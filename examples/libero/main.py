@@ -288,38 +288,48 @@ def eval_libero(
                     # 8. 获取并预处理两路 RGB 图像
                     # =================================================
 
-                    # obs["agentview_image"]：
-                    # 外部摄像头拍摄的场景图像。
+                    # obs["agentview_image"]：让仿真物体有机会稳定之后，
+                    # 正式调用 π0.5 推理前获取的第一帧外部摄像头观测图像。
+                    # agentview：外部场景视角，用于观察机械臂、桌面及操作物体。
                     #
-                    # [::-1, ::-1]：
-                    # 沿高度轴和宽度轴分别反转，相当于旋转 180°。
+                    # [start:stop:step]:
+                    # 1. start:stop 代表范围 [start, stop)
+                    # 2. step: 代表隔多少取一个元素
+                    #    1. +n: 正序，隔 n 个取一个元素
+                    #    2. -n: 逆序，隔 n 个取一个元素
+                    # [::-1, ::-1]：分别反转图像的高度轴和宽度轴，
+                    # 相当于将图像旋转 180°，以匹配模型训练时的图像预处理方式。
                     #
-                    # np.ascontiguousarray()：
-                    # 确保图像在内存中连续存储。
+                    # np.ascontiguousarray()：将旋转后的图像转换为内存连续的 NumPy 数组。
                     #
-                    # 原始图像 Shape 通常为 [height, width, 3]。
+                    # 原始图像 Shape：[height, width, 3]
+                    # 其中 3 表示 RGB 三个颜色通道。
                     img = np.ascontiguousarray(
                         obs["agentview_image"][::-1, ::-1]
                     )
 
-                    # obs["robot0_eye_in_hand_image"]：
-                    # 机器人末端附近的腕部摄像头图像。
-                    # 同样旋转 180° 并转换为连续数组。
+                    # obs["robot0_eye_in_hand_image"]：同一时刻获取的腕部摄像头观测图像。
+                    # eye-in-hand：摄像头安装在机器人末端附近，随机械臂一起运动，
+                    # 用于从近距离观察夹爪及其周围的操作物体。
+                    #
+                    # [::-1, ::-1]：将图像旋转 180°，与训练时的图像方向保持一致。
+                    # np.ascontiguousarray()：将旋转后的图像转换为内存连续的 NumPy 数组。
+                    #
+                    # 原始图像 Shape：[height, width, 3]
                     wrist_img = np.ascontiguousarray(
                         obs["robot0_eye_in_hand_image"][::-1, ::-1]
                     )
 
-                    # resize_with_pad()：
-                    # 将图像缩放并填充至指定尺寸，同时保持宽高比。
+                    # 将两路图像分别缩放并填充到模型要求的正方形尺寸，
+                    # 同时保持原始图像的宽高比，避免直接拉伸造成物体形状失真。
                     #
-                    # args.resize_size：目标图像的高度和宽度。
-                    #
-                    # convert_to_uint8()：
-                    # 将图像转换为 uint8 类型。
+                    # args.resize_size：目标图像的高度和宽度，例如 224。
+                    # image_tools.resize_with_pad()：缩放图像并填充边缘。
+                    # image_tools.convert_to_uint8()：将图像转换为 uint8 类型。
                     #
                     # 例如 args.resize_size = 224：
-                    #   img.shape       = [224, 224, 3]
-                    #   wrist_img.shape = [224, 224, 3]
+                    #   输入 img：[height, width, 3]
+                    #   输出 img：[224, 224, 3]
                     img = image_tools.convert_to_uint8(
                         image_tools.resize_with_pad(
                             img,
@@ -328,6 +338,8 @@ def eval_libero(
                         )
                     )
 
+                    # 对腕部摄像头图像执行相同的缩放、填充和类型转换。
+                    # 输出 wrist_img：[224, 224, 3]（当 resize_size = 224 时）
                     wrist_img = image_tools.convert_to_uint8(
                         image_tools.resize_with_pad(
                             wrist_img,
@@ -336,7 +348,9 @@ def eval_libero(
                         )
                     )
 
-                    # 保存当前外部摄像头图像，用于之后生成回放视频。
+                    # 保存当前时刻的外部摄像头图像，用于之后生成 Episode 回放视频。
+                    # replay_images：保存每个控制时刻的预处理图像。
+                    # 注意：这里只保存外部摄像头图像 img，不保存 wrist_img。
                     replay_images.append(img)
 
                     # =================================================
@@ -366,8 +380,11 @@ def eval_libero(
                             #    末端执行器位置，Shape：[3]。
                             #
                             # 2. _quat2axisangle(robot0_eef_quat)：
-                            #    将末端姿态从四元数转换为轴角表示，
-                            #    Shape：[3]。
+                            #    将末端姿态从四元数转换为轴角旋转向量，Shape：[3]。
+                            #
+                            #    轴角定义：r = θu = [θ*u_x, θ*u_y, θ*u_z]
+                            #    θ：旋转角度（弧度）；u = [u_x, u_y, u_z]：旋转轴的单位方向向量。
+                            #    x² + y² + z² = 1，因此 θ = ||r||，u = r / θ（θ ≠ 0
                             #
                             # 3. robot0_gripper_qpos：
                             #    夹爪位置状态，通常为 [2]。
@@ -378,10 +395,13 @@ def eval_libero(
                             # 因此该 LIBERO 状态向量通常为 [8]。
                             "observation/state": np.concatenate(
                                 (
+                                    # 1. 末端位置：[x, y, z]
                                     obs["robot0_eef_pos"],
+                                    # 2. 末端位姿：[θ*u_x, θ*u_y, θ*u_z]
                                     _quat2axisangle(
                                         obs["robot0_eef_quat"]
                                     ),
+                                    # 3. 夹爪状态：[gripper_joint_1, gripper_joint_2]
                                     obs["robot0_gripper_qpos"],
                                 )
                             ),
@@ -433,6 +453,10 @@ def eval_libero(
                         #   action_chunk[:5].shape = [5, 7]
                         #
                         # 注意：这里只取前 5 步，不会执行整个 50 步序列。
+                        #
+                        # extend() 会遍历二维数组 action_chunk[:args.replan_steps] 的每一行，
+                        # 逐行添加到 action_plan 中，共添加 args.replan_steps 次。
+                        # 每次添加一个 Shape 为 [action_dim] 的一维动作数组。
                         action_plan.extend(
                             action_chunk[:args.replan_steps]
                         )
